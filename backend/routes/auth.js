@@ -1,6 +1,4 @@
 import express from 'express';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { createClient } from '@supabase/supabase-js';
 
 const router = express.Router();
@@ -8,71 +6,94 @@ const router = express.Router();
 // Inisialisasi Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- ENDPOINT REGISTER ---
+// REGISTER
 router.post('/register', async (req, res) => {
-  const { name, email, password } = req.body;
+    const { name, email, password } = req.body;
 
-  try {
-    // 1. Cek email
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ message: "Email sudah digunakan" });
+    // 1. Validasi input
+    if (!name || !email || !password) {
+        return res.status(400).json({ message: "Nama, email, dan password wajib diisi." });
     }
 
-    // 2. Hash Password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    try {
+        // 2. Daftarkan email dan password ke Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+            email: email,
+            password: password,
+        });
 
-    // 3. Insert ke Supabase
-    const { error } = await supabase
-      .from('users')
-      .insert([{ name, email, password: hashedPassword }]);
+        if (authError) throw authError;
 
-    if (error) throw error;
+        const userId = authData.user?.id; 
 
-    res.status(201).json({ message: "Registrasi berhasil!" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Terjadi kesalahan server" });
-  }
+        if (userId) {
+            // 3. Masukkan data 'name' ke tabel public.profiles
+            const { error: profileError } = await supabase
+                .from('profiles')
+                .insert([
+                    { id: userId, name: name }
+                ]);
+
+            if (profileError) throw profileError;
+        }
+
+        res.status(201).json({ 
+            message: "Registrasi berhasil!", 
+            user: { id: userId, name, email } 
+        });
+
+    } catch (error) {
+        res.status(400).json({ message: error.message });
+    }
 });
 
-// --- ENDPOINT LOGIN ---
+// LOGIN
 router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+    const { email, password } = req.body;
 
-  try {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
-
-    if (!user || error) {
-      return res.status(400).json({ message: "Email atau password salah" });
+    // 1. Validasi input
+    if (!email || !password) {
+        return res.status(400).json({ message: "Email dan password wajib diisi." });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ message: "Email atau password salah" });
+    try {
+        // 2. Verifikasi email dan password menggunakan Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email: email,
+            password: password,
+        });
+
+        // Jika email tidak terdaftar atau password salah, Supabase otomatis melempar error
+        if (authError) {
+            return res.status(400).json({ message: "Email atau password salah" });
+        }
+
+        const userId = authData.user.id;
+
+        // 3. Ambil data 'name' dari tabel profiles berdasarkan ID yang sukses login
+        const { data: profileData, error: profileError } = await supabase
+            .from('profiles')
+            .select('name')
+            .eq('id', userId)
+            .single();
+
+        if (profileError) throw profileError;
+
+        // 4. Kirim response sukses. Token JWT otomatis didapatkan dari authData.session
+        res.json({
+            message: "Login sukses!",
+            token: authData.session.access_token, // JWT Token otomatis dari Supabase
+            user: { 
+                id: userId, 
+                name: profileData.name, 
+                email: authData.user.email 
+            }
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Terjadi kesalahan server" });
     }
-
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1d' });
-
-    res.json({
-      message: "Login sukses!",
-      token,
-      user: { id: user.id, name: user.name, email: user.email }
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Terjadi kesalahan server" });
-  }
 });
 
 // Export menggunakan export default
